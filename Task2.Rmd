@@ -1,0 +1,365 @@
+---
+title: "Predictive modeling of customer bookings"
+author: "Rounak Saha"
+date: "2025-01-26"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Introduction
+Customers are more empowered than ever because they have access to a wealth of information at their fingertips. This is one of the reasons the buying cycle is very different to what it used to be. Today, if you’re hoping that a customer purchases your flights or holidays as they come into the airport, you’ve already lost! Being reactive in this situation is not ideal; airlines must be proactive in order to acquire customers before they embark on their holiday.
+
+### Task
+With your predictive model, it is important to interpret the results in order to understand how “predictive” the data really was and whether we can feasibly use it to predict the target outcome (customers buying holidays). Therefore, you should evaluate the model's performance and output how each variable contributes to the predictive model's power.
+
+```{r, echo = TRUE, eval = TRUE, results="hide", fig.keep = "none"}
+# Install all the neccessary packages 
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+install.packages("tidyverse")
+install.packages("caret")        # split the data
+install.packages("caTools")      # K-fold cross validation
+install.packages("xgboost")      # Xgboost ml model
+install.packages("countrycode")  #Convert Country Names and Country Codes
+install.packages("ggplot2")      # plot the graph
+install.packages("gridExtra") #arrange multiple grid-based plots on a page
+install.packages("e1071") #for log transformation
+install.packages("fastDummies") # for one-hot encoding
+```
+
+```{r, echo = TRUE, eval = TRUE, results="hide",message=FALSE, fig.keep = "none", warning=FALSE}
+# Load the library 
+library(tidyverse)
+library(caret)
+library(caTools)
+library(xgboost)
+library(countrycode)
+library(ggplot2)
+library(gridExtra)
+library(e1071)
+library(fastDummies)
+```
+
+About the data :
+To provide more context, below is a more detailed data description, explaining exactly what each column means:
+
+num_passengers = number of passengers travelling
+
+sales_channel = sales channel booking was made on
+
+trip_type = trip Type (Round Trip, One Way, Circle Trip)
+
+purchase_lead = number of days between travel date and booking date
+
+length_of_stay = number of days spent at destination
+
+flight_hour = hour of flight departure
+
+flight_day = day of week of flight departure
+
+route = origin = destination flight route
+
+booking_origin = country from where booking was made
+
+wants_extra_baggage = if the customer wanted extra baggage in the booking
+
+wants_preferred_seat = if the customer wanted a preferred seat in the booking
+
+wants_in_flight_meals = if the customer wanted in-flight meals in the booking
+
+flight_duration = total duration of flight (in hours)
+
+booking_complete = flag indicating if the customer completed the booking
+
+```{r}
+#Load the dataset and explore 
+customer_booking <- read_csv("customer_booking.csv")
+#View(customer_booking)
+
+head(customer_booking)
+str(customer_booking)
+
+unique(customer_booking$sales_channel)
+unique(customer_booking$trip_type)
+unique(customer_booking$route)
+unique(customer_booking$booking_origin)
+```
+
+# Data Cleaning and Manupulation 
+
+```{r, warning=FALSE}
+# Encoding the categorical variables
+#Label Encoding
+customer_booking$sales_channel <- as.numeric(factor(customer_booking$sales_channel, 
+                                                    levels = unique(customer_booking$sales_channel)))-1
+#,
+                                            #levels = c('Internet', 'Mobile'),
+                                            #labels = c(1,2))
+#Mapping Encoding
+trip_type_mapping <- c("RoundTrip" = 0, "OneWay" = 1, "CircleTrip" = 2)
+customer_booking$trip_type <- trip_type_mapping[customer_booking$trip_type]
+customer_booking$trip_type<- as.numeric(customer_booking$trip_type)
+
+# Replace specific country name
+customer_booking$booking_origin[customer_booking$booking_origin == "Myanmar (Burma)"] <- "Myanmar"
+
+# The booking origin column also has many unique values, 
+# but because I don't want to delete the information on the origin of the booking, 
+# I will change the value of the booking origin, which initially contains 
+# the name of the country to the name of the continent
+
+customer_booking$booking_origin <- countrycode(customer_booking$booking_origin, "country.name", "continent")
+customer_booking$booking_origin[is.na(customer_booking$booking_origin)] <- "Others"
+
+#customer_booking$booking_origin <- factor(customer_booking$booking_origin, 
+                                        #  levels = c("Oceania","Asia","Europe","Americas", "Africa","Others"),
+                                         # labels = c(1:6))
+#(its better to do one-hot encoding when there are nominal cat values in col and more in number)
+
+# Drop columns that has many unique values
+length(unique(customer_booking$route))
+customer_booking <- customer_booking[,-8]
+
+#Make a new feature Because we want to know customer behavior to have a trip on holiday (weekend), 
+#so let's make a feature called is_weekend. if the flight day is Saturday or Sunday we give is_weekend value = 1, 
+#for another flight day we give it 0
+customer_booking <- customer_booking %>%
+  mutate(is_weekend = ifelse(flight_day %in% c("Sat", "Sun"), 1, 0))
+customer_booking <- customer_booking[,-7]
+
+summary(customer_booking)
+
+
+# converting variables to factors
+#customer_booking$wants_extra_baggage <- as.factor(customer_booking$wants_extra_baggage)
+#customer_booking$wants_preferred_seat <- as.factor(customer_booking$wants_preferred_seat)
+#customer_booking$wants_in_flight_meals <- as.factor(customer_booking$wants_in_flight_meals)
+#customer_booking$is_weekend <- as.factor(customer_booking$is_weekend)
+#customer_booking$booking_complete<- as.factor(customer_booking$booking_complete)
+
+str(customer_booking)
+```
+# Data Transformation and Visualization 
+```{r, warning=FALSE}
+str(customer_booking)
+
+#check the distribution on numerical data
+a1<- ggplot(customer_booking,                       # Initializes ggplot() using the dataset customer_booking
+            aes(x = num_passengers)) +              #Specifies that num_passengers is the variable for the x-axis
+  geom_histogram(aes(y = ..density..),              #By default, histograms show counts (frequency of occurrences).
+                                                    #..density.. ensures that the histogram is scaled to show density instead of raw counts, 
+                                                    # making it comparable with a density curve
+                 bins = 30,                         #Divides the x-axis range into 30 bins (intervals) for better granularity.
+                 fill = "lightblue",                #Fills the bars with a light blue color.
+                 color = "black") +                 #Adds black borders to each bin for better visibility.
+  geom_density(                                     #Adds a density curve (smoothed probability distribution). 
+    color = "red",                                  #Makes the curve red for distinction.
+    size = 1.2)                                     #Increases the line thickness for better visibility.
+
+
+a2<- ggplot(customer_booking, aes(x = purchase_lead)) +
+  geom_histogram(aes(y = ..density..), 
+                 bins = 30, 
+                 fill = "lightblue", 
+                 color = "black") +
+  geom_density(color = "red", size = 1.2)
+
+a3<- ggplot(customer_booking, aes(x = length_of_stay)) +
+  geom_histogram(aes(y = ..density..), 
+                 bins = 30, 
+                 fill = "lightblue", 
+                 color = "black") +
+  geom_density(color = "red", size = 1.2)
+
+a4<- ggplot(customer_booking, aes(x = flight_hour)) +
+  geom_histogram(aes(y = ..density..), 
+                 bins = 30, 
+                 fill = "lightblue", 
+                 color = "black") +
+  geom_density(color = "red", size = 1.2)
+
+a5<- ggplot(customer_booking, aes(x = flight_duration)) +
+  geom_histogram(aes(y = ..density..), 
+                 bins = 30, 
+                 fill = "lightblue", 
+                 color = "black") +
+  geom_density(color = "red", size = 1.2)
+
+grid.arrange(a1,a2,a3,a4,a5, nrow= 3, ncol=2)
+
+###### OR #######
+
+#variables1 <- c("num_passengers", "purchase_lead", 
+#               "length_of_stay", "flight_hour", "flight_duration")
+
+#plots <- lapply(variables1, function(var){
+#  ggplot(customer_booking, aes_string(x= var)) +
+#    geom_histogram(aes(y = ..density..), 
+#                   bins = 30,
+#                   fill= "lightblue",
+#                   color = "black") +
+#    geom_density(color= "red", size= 1.2)+
+#    ggtitle(var)
+# })
+# grid.arrange(grobs= plots, nrow=3, ncol=2)
+```
+
+```{r}
+# Copy original data
+df_transformed <- customer_booking
+
+# Checking the skewness of the numeric variables
+skewness(df_transformed$num_passengers)
+skewness(df_transformed$purchase_lead)
+skewness(df_transformed$length_of_stay)
+skewness(df_transformed$flight_hour)
+skewness(df_transformed$flight_duration)
+
+#skewness(df_transformed$num_passengers) #log
+#[1] 2.690747
+#skewness(df_transformed$purchase_lead) #sqrt
+#[1] 1.652936
+#skewness(df_transformed$length_of_stay)# log
+#[1] 5.274426
+#skewness(df_transformed$flight_hour). #no need
+#[1] 0.3965994
+#skewness(df_transformed$flight_duration)
+#[1] -0.3600581
+
+#Skewness Range	Recommended Transformation
+#0 to ±0.5	Already normal (No transformation needed)
+#0.5 to ±1.5	Log Transformation (log1p(x))
+#1.5 to ±3.0	Square Root Transformation (sqrt(x))
+#Above 3.0	Box-Cox or Log Transformation (log1p(x))
+  
+# Apply Log Transformation to Selected Columns
+cols1 <- c("num_passengers", "length_of_stay")
+
+for (col in cols1) {
+  df_transformed[[col]] <- log1p(df_transformed[[col]])  # log(x + 1) to avoid log(0)
+}                                            #[[col]] allows column selection dynamically inside a loop.
+
+# check skewness 
+skewness(df_transformed$num_passengers)
+skewness(df_transformed$length_of_stay)
+
+# Apply Square Root Transformation to Selected Columns
+df_transformed$purchase_lead <- sqrt(df_transformed$purchase_lead)
+skewness(df_transformed$purchase_lead)
+
+# there is no need to transform the flight hour column
+
+# Exponential Transformation to flight_duration column since the data is left skewed
+df_transformed$flight_duration <- exp(df_transformed$flight_duration)
+summary(df_transformed$flight_duration)
+# plot boxplot 
+# Find outliers 
+# Let's see outlier on numeric column
+variables2 <- c("num_passengers", "purchase_lead", 
+                "length_of_stay", "flight_hour", "flight_duration")
+
+plots2 <- lapply(variables2, function(var){
+  ggplot(df_transformed, aes_string(x= var)) +
+    geom_boxplot()
+})
+grid.arrange(grobs = plots2, nrow= 3, ncol= 2)
+
+# as we can see, on purchase lead and length of stay have a lot of outlier values, 
+# so we will delete outlier wtih zscore so that not many columns are wasted
+cols2 <- c("num_passengers", "purchase_lead", 
+           "length_of_stay", "flight_hour", "flight_duration")
+
+for(col in cols2){
+  zscore <- abs(scale(df_transformed[[col]]))
+  df_transformed <- df_transformed[zscore <3,]
+}
+
+#Now checking the boxplot again
+variables3 <- c("num_passengers", "purchase_lead", 
+                "length_of_stay", "flight_hour", "flight_duration")
+
+plots3 <- lapply(variables3, function(var){
+  ggplot(df_transformed, aes_string(x= var)) +
+    geom_boxplot()
+})
+grid.arrange(grobs = plots3, nrow= 3, ncol= 2)
+
+# One-hot encoding for booking_origin column
+df_encoded <- dummy_cols(df_transformed, select_columns = "booking_origin", 
+                         remove_selected_columns = TRUE)
+df_encoded
+```
+
+# Make a machine learning Model- XGboost
+```{r}
+#Split Data
+str(df_encoded)
+
+# Convert all integer columns to numeric
+df_encoded[] <- lapply(df_encoded, as.numeric) ##[] Preserves the data frame structure while applying lapply().
+                                               #Ensures that all columns are converted to numeric without changing df_encoded to a list.
+
+#Splitting the data
+set.seed(1234)
+split <- sample.split(df_encoded$booking_complete, SplitRatio = 0.8)
+train_set <- subset(df_encoded, split == TRUE)
+test_set <- subset(df_encoded, split ==FALSE)
+
+#Fitting Xgboost to training set
+classifier <- xgboost(data = as.matrix(train_set[-11]), 
+                      label = train_set$booking_complete, nrounds = 10)
+
+# Predicting the Test set results
+y_pred <- predict(classifier, newdata = as.matrix(test_set[-11]))
+y_pred <- (y_pred >= 0.4)
+
+# Making the Confusion Matrix
+cm <- table(test_set$booking_complete, y_pred)
+Acc <- (cm[1,1]+cm[2,2])/ sum(cm)
+
+# Applying k-Fold Cross Validation
+set.seed(123)
+folds = createFolds(df_encoded$booking_complete, k = 5)
+cv = lapply(folds, function(x) {
+  training_fold = df_encoded[-x, ]
+  test_fold = df_encoded[x, ]
+  classifier = xgboost(data = as.matrix(training_fold[-11]), 
+                       label = training_fold$booking_complete, nrounds = 10)
+  y_pred = predict(classifier, newdata = as.matrix(test_fold[-11]))
+  y_pred = (y_pred >= 0.4)
+  cm = table(test_fold$booking_complete, y_pred)
+  accuracy = (cm[1,1] + cm[2,2]) / (cm[1,1] + cm[2,2] + cm[1,2] + cm[2,1])
+  recall = cm[2,2] / (cm[2,1] + cm[2,2])
+  return(c(accuracy, recall))
+})
+
+cv_results_df = do.call(rbind, cv)
+colnames(cv_results_df) = c("Accuracy", "Recall")
+                            
+mean_Accuracy = mean(cv_results_df[, "Accuracy"])
+mean_Accuracy
+mean_recall = mean(cv_results_df[, "Recall"])
+mean_recall
+```
+# Feature Importance 
+```{r}
+# Get feature importance
+feature_importance <- xgb.importance(model = classifier)
+
+# Convert to dataframe and sort by importance
+feature_importance_df <- feature_importance %>%
+  arrange(desc(Gain)) %>%  # 'Gain' is the most important metric
+  head(10)  # Select top 10 features
+
+# Plot feature importance
+ggplot(feature_importance_df, aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  # Horizontal bar plot
+  labs(title = "Feature Importance (Top 10)", x = "Features", y = "Importance (Gain)") +
+  theme_minimal()
+
+```
+
+
+
+

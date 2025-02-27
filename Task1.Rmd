@@ -1,0 +1,329 @@
+---
+title: "SKYTRAX AIRLINE REVIEW ANALYSIS"
+author: "Rounak Saha"
+date: "2024-12-17"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+install.packages("tidyverse")
+install.packages("rvest")
+install.packages("data.table")
+install.packages("wordcloud")
+
+library(tidyverse)
+library(rvest)
+library(data.table)
+library(wordcloud)
+
+dataloop <- data.frame()
+
+# for loop
+for (i in 1:30) {
+  
+  # construct the URL with the current value of start
+  urlloop <- paste0("https://www.airlinequality.com/airline-reviews/british-airways/page/", 
+                    i, "/?sortby=post_date%3ADesc&pagesize=100")
+  
+  # Read the html content of the webpage
+  webpageloop <- read_html(urlloop)
+  
+  #Extract the data from the webpage using CSS selectors
+  Review = webpageloop %>% html_nodes(".text_content") %>% html_text()
+  # Extract all recommendations from multiple reviews
+  Recommended <- webpageloop %>%
+    html_nodes(".recommended+ .review-value") %>%  # Select review recommendation nodes
+    html_text(trim = TRUE) 
+  Date_Flown = webpageloop %>% html_nodes(".date_flown+ .review-value") %>% html_text()
+  Seat_Type	=webpageloop %>% html_nodes(".cabin_flown+ .review-value") %>% html_text()
+  Rating = webpageloop %>% html_nodes(".position-content .rating-10 span:nth-child(1)") %>% html_text()
+  
+  #combine extracted data into a data table
+  data <- data.frame(Review,Date_Flown,Rating,Recommended,Seat_Type) 
+  
+  data <- data %>%
+    mutate(Review = ifelse(grepl("\\|", Review), Review, paste("|", Review))) %>%  # Add a placeholder "|" if missing
+    separate(Review, into = c("Status", "Details"), sep = "\\|", fill = "right", extra = "merge") %>%
+    mutate(Status = trimws(Status), Details = trimws(Details))  # Trim whitespace
+  
+  
+  # add the data to overall data table
+  dataloop <- bind_rows(dataloop,data)
+  
+  #Pause for few secs to avoid overload
+  Sys.sleep(3)
+}
+
+view(dataloop)
+
+```
+
+```{r}
+str(dataloop)
+```
+
+```{r}
+dataloop$Rating <- as.numeric(dataloop$Rating)
+dataloop <- as.data.table(dataloop)
+```
+
+```{r}
+dataloop[, .N, Rating]
+dataloop[, .N, Recommended]
+```
+
+
+
+```{r}
+dataloop[, .(Average_rating= mean(Rating)), by= Seat_Type]
+```
+
+
+```{r}
+#We will now convert this into a tibble. One column, called line, will have the line number (from 1 to length(lines)), while the lines themselves will be placed into the column called text.
+
+Review_text <- tibble(review_no = 1: length(dataloop$Details), text= dataloop$Details)
+Review_text
+
+#We can now tokenise the text using unnest_tokens again, and then count the numbers
+library(tidytext)
+
+tokens<- Review_text %>% unnest_tokens(word, text)
+tokens
+
+#As we are only interested in words that are text, let’s remove all words with
+#digits and special characters from our set of words. We can do this using grepl().
+tokens <- as.data.table(tokens)
+tokens <- tokens[grepl("\\d", word)==FALSE, ]
+tokens <- tokens[grepl("[:alpha:]", word), ]
+tokens
+```
+
+
+```{r}
+#Now that the text is tidy, it is easy to count the number of occurrences of each word. We can do this using the count function from the tidyverse’s dplyr package. We will pass sort=TRUE so that the resulting tibble is sorted with the most common words at the top.
+
+tokens[, .N, word]
+
+#Analysis is made difficult because the text contains lots of short words, like “the”, “of” and “and”, which form the scaffolding of the sentences without necessarily containing meaning in and of themselves. These words, which are often called “stop words”, are sometimes not needed for textual analysis, and should be removed. Fortunately the tidytext library provides a data set of English stop words;
+
+data(stop_words)
+stop_words
+
+#remove certain words that will not be used to determine the positive or negative sentiment
+# Custom stopwords
+custom_stopwords <- tibble(word = c('flight', 'ba', 'passenger', 'u', 'london', 
+                                    'airway', 'british', 'airline', 'heathrow', 
+                                    'plane', 'lhr', 'review', 'airways', 'flights'))
+
+# Combine with default stopwords
+updated_stopwords <- stop_words %>%
+  bind_rows(custom_stopwords)
+
+# Check the updated stopwords
+print(updated_stopwords)
+
+#We can remove these stop words from word column by performing an anti-join between tokens and stop_words. An anti-join combines two tibbles, returning only the rows in the first tibble that are NOT in the second tibble. We use the anti-join function that is part of dplyr.
+
+review_tokens <- tokens %>% anti_join(updated_stopwords)
+review_tokens
+
+#Now, when we count the words, we will only get the meaningful words;
+review_tokens[, .N, word][order(-N)]
+```
+
+```{r}
+review_tokens[, .N, word][order(-N)] %>% head(20) %>% ggplot(aes(N, reorder(word, N))) + geom_col(aes(fill= N))+
+  labs(x = "Count", y = "Word", title = "Top 20 Words") +
+  theme_minimal() 
+  
+```
+
+```{r}
+# Sentiment Analysis
+#The tidytext library provides the get_sentiments function. This can be used to download one of many different sentiments dictionaries into a tibble.
+
+sentiments<- get_sentiments("nrc")
+sentiments
+
+# We can classify each word by sentiment by joining together the tidy text sherlock tibble with the dictionary of sentiments in sentiments. We do this using dplyr’s inner_join function. This will join together two tibbles via their common column (in this case, word), creating new rows as needed if a word appears twice.
+
+review_sentiments <- review_tokens %>% inner_join(sentiments)
+review_sentiments
+
+#We can then count how many words of different sentiments there are using filter and count.
+review_sentiments %>% filter(sentiment =="positive") %>% count(word, sort = TRUE) 
+
+# We could get the total number of words of each type using;
+review_sentiments %>% filter(sentiment =="positive") %>% count(word, sort = TRUE) %>% summarise(total= sum(n))
+
+#Alternatively (and much more simply) we could just count the number of occurrences of each sentiment in the sentiments column.
+review_sentiments %>% count(sentiment)
+
+#We could plot this using a similar technique as the last section (this time converting the sentiments into factors)
+review_sentiments %>% count(sentiment) %>% ggplot(aes(n, reorder(sentiment, n))) + geom_col(aes(fill= n)) + labs(y= NULL)
+```
+
+```{r}
+sentiment_per <- review_sentiments %>% group_by(sentiment) %>% count(sentiment)
+
+total_count<- sum(sentiment_per$n)
+
+sentiment_summary <- sentiment_per %>% 
+  mutate(category = case_when(
+    sentiment == "positive" ~ "Positive",
+    sentiment == "joy" ~ "Positive",
+    sentiment == "trust" ~ "Positive",
+    sentiment == "negative" ~ "Negative",
+    sentiment == "sadness" ~ "Negative",
+    sentiment == "anger" ~ "Negative",
+    sentiment == "disgust" ~ "Negative",
+    sentiment == "anticipation" ~ "Neutral",
+    sentiment == "fear" ~ "Neutral",
+    sentiment == "surprise" ~ "Neutral",
+  )) %>% 
+  group_by(category) %>% 
+  summarise(precentage = sum(n)/ total_count * 100)
+
+
+```
+
+
+```{r}
+#What we want to do now is to count the number of words with different sentiments for differnet review of the text.
+review_sentiments_pivot<- review_sentiments %>% count(review_no,sentiment)
+
+#Next, we can now pivot the tibble so that the sentiments are the columns, and we have one row per block of text. We do this using the pivot_wider function from the tidyr package. In this case, we want to pivot the tibble so that the names of the new columns come from the text values in the current “sentiment” column, and the values in those columns come from the current “n” column (which contains the number of words of each sentiment). It may be that some sentiments don’t appear in a block, so we need to ensure that any missing sentiments are filled in with a default value of 0.
+
+review_sentiments_pivot <- review_sentiments_pivot %>% pivot_wider(names_from = sentiment, values_from = n, values_fill = 0)
+review_sentiments_pivot
+
+#We can now do things like calculate the difference between the number of positive and negative sentiments in each block, which could be placed into a new column called “sentiment”;
+review_sentiments_pivot <- review_sentiments_pivot %>% mutate(sentiment = positive - negative)
+review_sentiments_pivot
+
+#This could then be graphed, with the “sentiment” column on the y axis, and the review no on the x axis;
+# checking for first 300 reviews
+review_sentiments_pivot %>% head(300) %>% ggplot(aes(review_no, sentiment)) + geom_col()
+
+```
+
+```{r}
+#Word clouds
+#We are going to create word clouds from the text reviews
+# The wordcloud function is very easy to use. You just need to pass in a column of words (review_tokens_wordcloud$word) and a column of their counts (review_tokens_wordcloud$n). We need to restrict the plot to only displaying the common words, or else we will end up overloading R. We do this by only displaying words that appear 50 or more times, using min.freq=50. The random.order argument is set to FALSE so that the plot is reproducible (as much as possible - the option tells R to plot the words in order of descreasing frequency, rather than a random order).
+review_tokens_wordcloud <- review_tokens[, .N, word][order(-N)]
+suppressWarnings(review_tokens_wordcloud %>% with(wordcloud(word,N, min.freq = 50,random.order=FALSE,colors=brewer.pal(8, "Dark2"))))
+```
+
+```{r}
+#n-grams
+#It is very common that you want to tokenise using tokens that represent pairs of words. This is because words correlate with one another, and the choice of first word can significantly change the meaning of the second word.
+#A token comprising n words is called an “n-gram” (or “ngram”). Tokenising on bigrams or n-grams enable you to capture examine the correlations, and more importantly, the immediate context around each word.
+
+Review_ngrams <- Review_text %>% unnest_tokens(ngram, text, token = "ngrams", n=3)
+Review_ngrams
+
+#In this case we have placed the ngrams into the column ngram.
+
+#Now we want to remove pairs of words where one in the pair is a stop word. To do this we must first separate the ngram column into three, which we will call word1, word2 and word3. Note that the separator of a ngram is always a space, so sep = " " is safe to use.
+
+Review_ngrams <- Review_ngrams %>% separate(ngram, c("word1", "word2", "word3"), sep = " ")
+Review_ngrams
+
+#Next we need to filter only the rows where neither word1 or word2 or word3 have a word in stop_words. We can’t use anti_join directly, so instead have to apply the filter twice, first including rows where word1 is not in the word column of stop_words, and then including rows where word2 is not in the word column of stop_words. Note that %in% is the operator to see if a value is in a column of values.
+Review_ngrams <- Review_ngrams %>% 
+                  filter(!word1 %in% updated_stopwords$word) %>% 
+                  filter(!word2 %in% updated_stopwords$word) %>% 
+                  filter(!word3 %in% updated_stopwords$word)
+
+Review_ngrams
+
+#Next, we can see that there are a lot of NAs in the tibble. These are caused by blank lines or other tokenisation issues. We can remove them by filtering twice again, including rows only where word1 is not NA,word2 is not NA and where word3 is not NA.
+Review_ngrams <- Review_ngrams %>%
+                      filter(!is.na(word1)) %>% 
+                      filter(!is.na(word2)) %>% 
+                      filter(!is.na(word3))
+Review_ngrams
+
+#Finally! we will rejoin the word1 and word2 columns into a single “ngram” column, using the “unite” function. In this case, we join using a single space (sep=" "), as this is the default separator for n-grams.
+Review_ngrams <- Review_ngrams %>% unite(ngram, word1,word2, word3, sep = " ")
+Review_ngrams
+
+```
+
+```{r}
+#We can now count the ngrams as before, e.g.
+ngram_counts <- Review_ngrams %>% count(ngram, sort=TRUE)
+ngram_counts %>%
+  head(15) %>%
+  ggplot(aes(n, reorder(ngram, n))) + # Reorder ngram based on n in descending order
+  geom_col(aes(fill= n)) +
+  labs(x = "Frequency", y = "N-gram", title = "Top 15 N-grams") +
+  theme_minimal()
+
+```
+
+```{r}
+# Visualising correlations between words
+#We can go beyond just counting, and can draw graphs that visualise the connections and correlations between words in a text. To do this, we need to tokenise on ngrams, but now not unite the individual word1, word2and word3 back into a single ngram column. Instead, we leave as separate columns, and then ask count to count the number of times each word1-word2-word3 pair appears in the text;
+
+Review_ngrams_count <- Review_text %>% unnest_tokens(ngram, text, token = "ngrams", n=3) %>% 
+  separate(ngram, c("word1", "word2", "word3"), sep = " ") %>% 
+                  filter(!word1 %in% updated_stopwords$word) %>% 
+                  filter(!word2 %in% updated_stopwords$word) %>% 
+                  filter(!word3 %in% updated_stopwords$word) %>% 
+                      filter(!is.na(word1)) %>% 
+                      filter(!is.na(word2)) %>% 
+                      filter(!is.na(word3)) %>% 
+                      count(word1, word2, word3, sort = TRUE)
+
+Review_ngrams_count
+
+#This table can now be converted into a directed graph. A directed graph is one where nodes (in this case individual words) and connected via edges (in this case, the number of times word1 is followed by word2 is followed by word3). The graph_from_data_frame function from the igraph package can create a directed graph from a tibble.
+
+#To prevent the graph becoming too large, we will only graph pairs of words that appear seven or more times (by filtering on n >= 5).
+install.packages("igraph")
+library(igraph)
+
+ngram_graph <- Review_ngrams_count %>% filter(n > 5) %>% 
+  graph_from_data_frame()
+ngram_graph
+
+#The graph_from_data_frame takes a tibble where the first three columns name the nodes and specify their connection, while the fourth (and subsequent) columns provide edge attributes (e.g. here the weight of the edge is the number of times the pair of words appears).
+
+#Now that we have built the directed graph, we can visualise it using the ggraph function from the ggraph package.
+
+#There is a grammar for these graphs, e.g. we pass the data into ggraph, and then add layers, such as geom_edge_link to draw the edges, geom_node_point to draw the nodes (words), and geom_node_text to add text to each node where the label comes from the name of each node.
+install.packages("ggraph")
+library(ggraph)
+
+ggraph(ngram_graph, layout = "fr") +
+  geom_edge_link() +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+```
+
+```{r}
+#This graph isn’t very pretty. By looking online at the options to improve ggraph, and comparing against graphs you like online (e.g. this one), we can improve this to;
+
+ggraph(ngram_graph, layout = "fr") +
+     geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                    arrow = grid::arrow(type = "closed", length = unit(2, "mm")), 
+                    end_cap = circle(1, "mm")) +
+     geom_node_point(color = "lightblue", size = 2) +
+     geom_node_text(aes(label = name), size = 2) +
+     theme_void()
+
+
+```
+
+
+
+
+
+
+
