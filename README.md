@@ -51,7 +51,7 @@ After training your model, you should evaluate how well it performed by conducti
 
 It is recommended that the analysis portion of this task is done in R or Python.
 
-
+*Certification Link:* Certificate
 
 
 
